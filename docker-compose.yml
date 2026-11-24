@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: opsboard
+      POSTGRES_PASSWORD: localpass
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  deploy-service:
+    build: ./services/deploy-service
+    environment:
+      DB_HOST: db
+      DB_NAME: deploydb
+      DB_USER: opsboard
+      DB_PASSWORD: localpass
+    depends_on: [db]
+
+  incident-service:
+    build: ./services/incident-service
+    environment:
+      DB_HOST: db
+      DB_NAME: incidentdb
+      DB_USER: opsboard
+      DB_PASSWORD: localpass
+    depends_on: [db]
+
+  gateway:
+    image: nginx:alpine
+    ports: ["8080:80"]
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on: [deploy-service, incident-service]
+
+# The notifier needs real SQS/SNS, so it is not part of local compose. We add it in the messaging stage.

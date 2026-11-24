@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpsBoard</title>
+  <style>
+    :root { --bg:#f6f7f9; --card:#fff; --text:#1c2330; --muted:#6b7686; --line:#e3e6ec; --ok:#1a7f4b; --bad:#c0392b; --warn:#b7791f; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#12161d; --card:#1b212b; --text:#e6e9ef; --muted:#8a95a6; --line:#2c3441; --ok:#4cc38a; --bad:#ef6b5b; --warn:#e0a94a; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+    header { padding:1rem 1.5rem; border-bottom:1px solid var(--line); background:var(--card); }
+    header h1 { margin:0; font-size:1.2rem; }
+    header small { color:var(--muted); }
+    main { display:grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap:1rem; padding:1rem 1.5rem; }
+    section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:1rem; }
+    h2 { margin:0 0 .75rem; font-size:1rem; }
+    form { display:grid; grid-template-columns: 1fr 1fr; gap:.4rem; margin-bottom:.75rem; }
+    form input, form select, form button { padding:.4rem; font:inherit; }
+    form .wide { grid-column: 1 / -1; }
+    ul { list-style:none; margin:0; padding:0; }
+    li { padding:.5rem 0; border-top:1px solid var(--line); font-size:.9rem; display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+    .tag { font-size:.7rem; padding:.1rem .4rem; border-radius:4px; border:1px solid var(--line); color:var(--muted); }
+    .success, .resolved { color:var(--ok); border-color:var(--ok); }
+    .failed, .sev1, .open.sev1 { color:var(--bad); border-color:var(--bad); }
+    .rolled_back, .sev2 { color:var(--warn); border-color:var(--warn); }
+    .grow { flex:1; min-width:140px; }
+    .err { color:var(--bad); font-size:.8rem; min-height:1.1em; }
+  </style>
+</head>
+<body>
+  <header><h1>OpsBoard <small>deployments and incidents</small></h1></header>
+  <main>
+    <section>
+      <h2>Deployments <small class="tag">deploy-service</small></h2>
+      <form id="deployForm">
+        <input class="wide" name="service" placeholder="Service (e.g. checkout-api)" required>
+        <input name="version" placeholder="Version (e.g. v1.4.2)" required>
+        <input name="deployed_by" placeholder="Deployed by">
+        <select name="environment"><option>dev</option><option>staging</option><option>prod</option></select>
+        <select name="status"><option>success</option><option>failed</option><option>rolled_back</option></select>
+        <button class="wide">Record deployment</button>
+      </form>
+      <div class="err" id="deployErr"></div>
+      <ul id="deployments"></ul>
+    </section>
+
+    <section>
+      <h2>Incidents <small class="tag">incident-service</small></h2>
+      <form id="incidentForm">
+        <input class="wide" name="title" placeholder="What is broken?" required>
+        <input name="service" placeholder="Affected service" required>
+        <select name="severity"><option>sev3</option><option>sev2</option><option>sev1</option></select>
+        <button class="wide">Open incident</button>
+      </form>
+      <div class="err" id="incidentErr"></div>
+      <ul id="incidents"></ul>
+    </section>
+  </main>
+
+<script>
+  // Relative URLs on purpose. Locally nginx routes them, in AWS CloudFront + ALB do.
+  async function call(path, options) {
+    const res = await fetch(path, options);
+    const body = res.status === 204 ? null : await res.json();
+    if (!res.ok) throw new Error((body && body.error) || `HTTP ${res.status}`);
+    return body;
+  }
+
+  function el(tag, text, cls) {
+    const e = document.createElement(tag);
+    if (text !== undefined) e.textContent = text;
+    if (cls) e.className = cls;
+    return e;
+  }
+
+  async function loadDeployments() {
+    const list = document.getElementById("deployments");
+    try {
+      const rows = await call("/api/deployments");
+      list.replaceChildren(...rows.map(d => {
+        const li = el("li");
+        li.append(el("strong", d.service), el("span", d.version, "tag"), el("span", d.environment, "tag"),
+                  el("span", d.status, "tag " + d.status), el("span", "by " + d.deployed_by, "tag"));
+        return li;
+      }));
+    } catch (e) { list.replaceChildren(el("li", "Could not load deployments: " + e.message)); }
+  }
+
+  async function loadIncidents() {
+    const list = document.getElementById("incidents");
+    try {
+      const rows = await call("/api/incidents");
+      list.replaceChildren(...rows.map(i => {
+        const li = el("li");
+        li.append(el("span", i.severity, "tag " + i.severity), el("span", i.status, "tag " + (i.status === "resolved" ? "resolved" : "")),
+                  el("span", `${i.title} (${i.service})`, "grow"));
+        if (i.status === "open") {
+          const b = el("button", "Resolve");
+          b.onclick = async () => { await call(`/api/incidents/${i.id}/resolve`, { method: "POST" }); loadIncidents(); };
+          li.append(b);
+        }
+        return li;
+      }));
+    } catch (e) { list.replaceChildren(el("li", "Could not load incidents: " + e.message)); }
+  }
+
+  function wire(formId, errId, path, reload) {
+    document.getElementById(formId).addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const form = ev.target, err = document.getElementById(errId);
+      try {
+        await call(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                           body: JSON.stringify(Object.fromEntries(new FormData(form))) });
+        err.textContent = "";
+        form.reset();
+        reload();
+      } catch (e) { err.textContent = e.message; }
+    });
+  }
+
+  wire("deployForm", "deployErr", "/api/deployments", loadDeployments);
+  wire("incidentForm", "incidentErr", "/api/incidents", loadIncidents);
+  loadDeployments();
+  loadIncidents();
+</script>
+</body>
+</html>
